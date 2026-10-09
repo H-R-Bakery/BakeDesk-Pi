@@ -93,7 +93,7 @@ services:
     volumes:
       - ../data/postgres:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -113,7 +113,7 @@ services:
       - --save
       - ""
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: [ "CMD", "valkey-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -131,11 +131,15 @@ services:
         cors_origins http://bakedesk.local
         anonymous
     healthcheck:
-      test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/mercure/health/ready" ]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost/.well-known/mercure || [ $? -eq 1 ]"
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 60s
+      start_period: 30s
     restart: unless-stopped
     networks:
       - frontend
@@ -147,7 +151,7 @@ services:
       - gotenberg
       - --api-port=8833
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8833/health"]
+      test: [ "CMD", "curl", "-fsS", "http://localhost:8833/health" ]
       interval: 10s
       timeout: 5s
       retries: 10
