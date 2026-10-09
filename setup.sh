@@ -103,7 +103,11 @@ prepare_directories() {
     log "Preparing persistent directories under $DATA_DIR."
     install -d -o root -g root -m 0755 "$BAKEDESK_ROOT"
     install -d -o root -g root -m 0750 "$DATA_DIR"
-    install -d -o root -g root -m 0750 "$DATA_DIR/postgres"
+
+    # The postgres:alpine image runs as postgres, commonly UID/GID 70,
+    # and needs to create its database data directory inside this bind mount.
+    install -d -o 70 -g 70 -m 0700 "$DATA_DIR/postgres"
+
     # The PHP image runs as www-data (UID/GID 33) and needs document storage.
     install -d -o 33 -g 33 -m 0750 "$DATA_DIR/documents"
 }
