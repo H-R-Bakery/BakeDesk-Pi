@@ -1,0 +1,21 @@
+# The build context is /opt/bakedesk, not this repository. Keep the context
+# limited to the sibling BakeDesk checkout and leave host data outside it.
+**
+!app/
+!app/**
+!deploy/
+!deploy/docker/
+!deploy/docker/php/
+!deploy/docker/php/php.ini
+!deploy/docker/php/www.conf
+
+app/.env*
+app/.git/
+app/.idea/
+app/docker/
+app/vendor/
+app/var/
+app/tests/
+app/.phpunit.cache/
+app/public/assets/
+app/assets/vendor/

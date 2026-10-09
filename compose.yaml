@@ -1,0 +1,163 @@
+name: bakedesk
+
+services:
+  php:
+    image: bakedesk-php:${BAKEDESK_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/docker/php/Dockerfile
+    env_file:
+      - ${BAKEDESK_ENV_FILE:-.env}
+    environment:
+      APP_ENV: prod
+      APP_DEBUG: "0"
+    volumes:
+      # The image contains compiled public assets. Docker copies them into the
+      # shared volume on first creation; Nginx mounts the same volume read-only.
+      - public_assets:/var/www/html/public:ro
+      - ../data/documents:/var/www/html/var/storage/documents
+    expose:
+      - "9000"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      database:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      mercure:
+        condition: service_healthy
+      gotenberg:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - backend
+
+  worker:
+    image: bakedesk-php:${BAKEDESK_IMAGE_TAG:-local}
+    env_file:
+      - ${BAKEDESK_ENV_FILE:-.env}
+    environment:
+      APP_ENV: prod
+      APP_DEBUG: "0"
+    command:
+      - php
+      - bin/console
+      - messenger:consume
+      - print
+      - --no-interaction
+      - --memory-limit=128M
+      - --time-limit=3600
+    volumes:
+      - ../data/documents:/var/www/html/var/storage/documents
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      database:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      mercure:
+        condition: service_healthy
+      gotenberg:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - public_assets:/var/www/html/public:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      php:
+        condition: service_started
+      mercure:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - frontend
+      - backend
+
+  database:
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bakery}
+      POSTGRES_USER: ${POSTGRES_USER:-baker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ../data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - backend
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    command:
+      - valkey-server
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - backend
+
+  mercure:
+    image: dunglas/mercure:v0.19
+    environment:
+      SERVER_NAME: ":80"
+      MERCURE_PUBLISHER_JWT_KEY: ${MERCURE_JWT_SECRET:?Set MERCURE_JWT_SECRET in .env}
+      MERCURE_SUBSCRIBER_JWT_KEY: ${MERCURE_JWT_SECRET:?Set MERCURE_JWT_SECRET in .env}
+      MERCURE_EXTRA_DIRECTIVES: |
+        cors_origins http://bakedesk.local
+        anonymous
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2019/mercure/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - frontend
+      - backend
+
+  gotenberg:
+    image: gotenberg/gotenberg:8-chromium
+    command:
+      - gotenberg
+      - --api-port=8833
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8833/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - backend
+
+volumes:
+  # This is generated from the image and is safe to recreate during an update.
+  public_assets:
+
+networks:
+  frontend:
+  backend:

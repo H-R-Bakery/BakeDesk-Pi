@@ -1,0 +1,13 @@
+# Local deployment secrets and overrides
+.env
+.env.*
+!.env.example
+
+# IDE metadata
+.idea/
+.vscode/
+
+# Local files
+*.swp
+*.swo
+.DS_Store
