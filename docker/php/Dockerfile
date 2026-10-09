@@ -70,8 +70,7 @@ RUN touch .env \
     && php bin/console cache:clear --no-warmup \
     && php bin/console assets:install public \
     && php bin/console importmap:install --no-interaction \
-    && php bin/console asset-map:compile --no-interaction \
-    && rm -f .env
+    && php bin/console asset-map:compile --no-interaction
 
 FROM php:8.4-fpm-bookworm AS production
 
@@ -95,8 +94,9 @@ WORKDIR /var/www/html
 RUN rm -f /usr/local/etc/php-fpm.d/www.conf
 COPY --from=build --chown=www-data:www-data /var/www/html /var/www/html
 
-RUN mkdir -p var/cache var/log var/storage/default var/storage/documents \
-    && chown -R www-data:www-data var
+RUN touch .env \
+    && mkdir -p var/cache var/log var/storage/default var/storage/documents \
+    && chown -R www-data:www-data .env var
 
 USER www-data
 EXPOSE 9000
