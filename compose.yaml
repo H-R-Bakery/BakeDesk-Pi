@@ -11,6 +11,7 @@ services:
     environment:
       APP_ENV: prod
       APP_DEBUG: "0"
+      SYMFONY_DOTENV_VARS: ""
     volumes:
       # The image contains compiled public assets. Docker copies them into the
       # shared volume on first creation; Nginx mounts the same volume read-only.
@@ -40,6 +41,7 @@ services:
     environment:
       APP_ENV: prod
       APP_DEBUG: "0"
+      SYMFONY_DOTENV_VARS: ""
     command:
       - php
       - bin/console
