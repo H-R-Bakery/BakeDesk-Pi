@@ -131,11 +131,11 @@ services:
         cors_origins http://bakedesk.local
         anonymous
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2019/mercure/health/ready"]
+      test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/mercure/health/ready" ]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 12
+      start_period: 60s
     restart: unless-stopped
     networks:
       - frontend
