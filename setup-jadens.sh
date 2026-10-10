@@ -94,7 +94,7 @@ inspect_driver_package() {
     [[ -f $DRIVER_PACKAGE ]] || die "JADENS driver package not found: $DRIVER_PACKAGE"
     [[ -r $DRIVER_PACKAGE ]] || die "JADENS driver package is not readable: $DRIVER_PACKAGE"
 
-    local package_name package_version package_arch
+    local package_name package_version package_arch package_contents
     package_name=$(dpkg-deb -f "$DRIVER_PACKAGE" Package)
     package_version=$(dpkg-deb -f "$DRIVER_PACKAGE" Version)
     package_arch=$(dpkg-deb -f "$DRIVER_PACKAGE" Architecture)
@@ -105,9 +105,10 @@ inspect_driver_package() {
         || die "Unexpected JADENS driver version: $package_version (expected $DRIVER_VERSION)"
     [[ $package_arch == all ]] \
         || die "Unexpected JADENS package architecture: $package_arch (expected all)"
-    dpkg-deb --contents "$DRIVER_PACKAGE" | grep -Fq './opt/jadens-printer-driver/arm64/rastertolabel' \
+    package_contents=$(dpkg-deb --contents "$DRIVER_PACKAGE")
+    grep -Fq './opt/jadens-printer-driver/arm64/rastertolabel' <<<"$package_contents" \
         || die 'The JADENS package does not contain its ARM64 raster filter.'
-    dpkg-deb --contents "$DRIVER_PACKAGE" | grep -Fq './usr/share/cups/model/Jadens/JD-668BT.ppd' \
+    grep -Fq './usr/share/cups/model/Jadens/JD-668BT.ppd' <<<"$package_contents" \
         || die 'The JADENS package does not contain the JD-668BT PPD.'
 
     log "Using JADENS Linux Driver $package_version from $DRIVER_PACKAGE."
