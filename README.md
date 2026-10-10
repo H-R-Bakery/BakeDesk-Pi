@@ -56,6 +56,9 @@ through host CUPS:
 sudo ./setup-jadens.sh
 ```
 
+Run this after `deploy.sh` has started the Compose stack; the helper requires a
+running PHP or worker container to verify HTTP access to the CUPS queue.
+
 It installs and verifies JADENS Linux Driver `3.3.6.506`, discovers the
 JADENS model and device URI from CUPS, and creates or updates the predictable
 queue `bakedesk-label`. The original vendor download URL for this exact
@@ -101,8 +104,15 @@ sudo ./setup-jadens.sh
 The Compose backend network uses the stable private subnet
 `172.30.42.0/24`. The optional helper configures CUPS to listen on the Docker
 host-gateway address and permits `/printers` access only from localhost and
-that backend subnet. CUPS administration is left under the existing local
-administrative access rules, and no LAN-wide CUPS administration is enabled.
+that backend subnet. On Debian/Raspberry Pi OS with systemd socket activation,
+the helper manages
+`/etc/systemd/system/cups.socket.d/bakedesk.conf`, retaining the vendor
+`/run/cups/cups.sock` while adding only the localhost and Docker host-gateway
+TCP listeners. It explicitly accepts the `host.docker.internal` CUPS host name
+through `ServerAlias`. The helper verifies the actual TCP listener and checks
+the queue endpoint from a running BakeDesk PHP or worker container. CUPS
+administration is left under the existing local administrative access rules,
+and no LAN-wide CUPS administration is enabled.
 
 ## Updates and checks
 

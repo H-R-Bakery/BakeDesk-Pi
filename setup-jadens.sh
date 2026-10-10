@@ -16,9 +16,13 @@ readonly DOCKER_SUBNET=${BAKEDESK_DOCKER_SUBNET:-172.30.42.0/24}
 readonly CUPSD_CONF=/etc/cups/cupsd.conf
 readonly CUPSD_MARKER_BEGIN='# BEGIN BakeDesk JADENS access'
 readonly CUPSD_MARKER_END='# END BakeDesk JADENS access'
+readonly CUPSD_SOCKET_DROPIN_DIR=/etc/systemd/system/cups.socket.d
+readonly CUPSD_SOCKET_DROPIN=$CUPSD_SOCKET_DROPIN_DIR/bakedesk.conf
 readonly COMPOSE_FILE=$DEPLOY_DIR/compose.yaml
 
 TEST_PRINT=0
+HOST_GATEWAY_IP=''
+CONTAINER_HTTP_STATUS=''
 
 log() {
     printf '[BakeDesk-Pi] %s\n' "$*"
@@ -200,10 +204,11 @@ configure_queue() {
 }
 
 configure_media() {
-    local options line option values token value normalized
+    local options line option values token value normalized is_default
     options=$(lpoptions -p "$QUEUE_NAME" -l)
     SELECTED_MEDIA_OPTION=''
     SELECTED_MEDIA_VALUE=''
+    SELECTED_MEDIA_IS_DEFAULT=0
 
     while IFS= read -r line; do
         [[ $line == *:* ]] || continue
@@ -213,11 +218,17 @@ configure_media() {
         values=${line#*:}
         for token in $values; do
             value=${token%%/*}
+            is_default=0
+            if [[ $value == \** ]]; then
+                is_default=1
+                value=${value#\*}
+            fi
             normalized=${value,,}
             case $normalized in
                 4x6|4x6in|4x6inch|4x6inches|w288h432)
                     SELECTED_MEDIA_OPTION=$option
                     SELECTED_MEDIA_VALUE=$value
+                    SELECTED_MEDIA_IS_DEFAULT=$is_default
                     break 2
                     ;;
             esac
@@ -225,8 +236,12 @@ configure_media() {
     done <<<"$options"
 
     if [[ -n $SELECTED_MEDIA_OPTION ]]; then
-        lpadmin -p "$QUEUE_NAME" -o "$SELECTED_MEDIA_OPTION=$SELECTED_MEDIA_VALUE"
-        log "Configured the exact driver-exposed 4x6 media option: $SELECTED_MEDIA_OPTION=$SELECTED_MEDIA_VALUE"
+        if ((SELECTED_MEDIA_IS_DEFAULT)); then
+            log "4x6 media is already selected: $SELECTED_MEDIA_OPTION=$SELECTED_MEDIA_VALUE"
+        else
+            lpadmin -p "$QUEUE_NAME" -o "$SELECTED_MEDIA_OPTION=$SELECTED_MEDIA_VALUE"
+            log "Configured the driver-exposed 4x6 media option: $SELECTED_MEDIA_OPTION=$SELECTED_MEDIA_VALUE"
+        fi
     else
         log 'The installed driver does not expose an exact 4x6 media option; leaving the queue valid for manual media verification.'
     fi
@@ -236,9 +251,8 @@ configure_cups_access() {
     [[ -f $CUPSD_CONF ]] || die "CUPS configuration file is missing: $CUPSD_CONF"
     command -v docker >/dev/null 2>&1 || die 'Docker is required to determine the host-gateway address for container CUPS access.'
 
-    local host_gateway_ip
-    host_gateway_ip=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-    [[ $host_gateway_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+    HOST_GATEWAY_IP=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    [[ $HOST_GATEWAY_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
         || die 'Could not determine Docker host-gateway IPv4 address from the default bridge.'
 
     if grep -Eiq '^[[:space:]]*(Port[[:space:]]+631|Listen[[:space:]]+(\*|0\.0\.0\.0|::|\[::\])(:631)?[[:space:]]*$)' \
@@ -255,9 +269,10 @@ configure_cups_access() {
     printf '%s\n' \
         "$CUPSD_MARKER_BEGIN" \
         '# Managed by BakeDesk-Pi setup-jadens.sh.' \
-        "# host.docker.internal resolves to the Docker host gateway: $host_gateway_ip" \
+        "# host.docker.internal resolves to the Docker host gateway: $HOST_GATEWAY_IP" \
         "# The Compose backend network is the only non-local client allowed to print." \
-        "Listen $host_gateway_ip:631" \
+        'ServerAlias host.docker.internal' \
+        "Listen $HOST_GATEWAY_IP:631" \
         '<Location /printers>' \
         '  Order allow,deny' \
         '  Allow from 127.0.0.1' \
@@ -271,6 +286,7 @@ configure_cups_access() {
     awk -v begin="$CUPSD_MARKER_BEGIN" -v end="$CUPSD_MARKER_END" '
         $0 == begin { skipping=1; next }
         skipping && $0 == end { skipping=0; next }
+        !skipping && $0 ~ /^[[:space:]]*ServerAlias[[:space:]]+host\.docker\.internal[[:space:]]*$/ { next }
         !skipping { print }
     ' "$CUPSD_CONF" >"$config_without_old_block"
     combined_config=$(mktemp)
@@ -283,10 +299,40 @@ configure_cups_access() {
     rm -f "$config_tmp" "$config_without_old_block" "$combined_config"
 
     cupsd -t || die 'The generated CUPS configuration failed validation; CUPS was not restarted.'
-    systemctl restart cups
+    configure_cups_socket_activation
     systemctl is-active --quiet cups || die 'CUPS did not become active after applying Docker access rules.'
-    log "CUPS listens on the Docker host-gateway address $host_gateway_ip:631; printer access is limited to $DOCKER_SUBNET and localhost."
+    verify_cups_tcp_listener
+    log "Printer access is limited to $DOCKER_SUBNET and localhost."
     log 'CUPS administration remains governed by the existing local/admin access rules.'
+}
+
+configure_cups_socket_activation() {
+    local dropin_tmp
+
+    install -d -o root -g root -m 0755 "$CUPSD_SOCKET_DROPIN_DIR"
+    dropin_tmp=$(mktemp)
+    printf '%s\n' \
+        '[Socket]' \
+        'ListenStream=127.0.0.1:631' \
+        "ListenStream=$HOST_GATEWAY_IP:631" \
+        >"$dropin_tmp"
+    install -o root -g root -m 0644 "$dropin_tmp" "$CUPSD_SOCKET_DROPIN"
+    rm -f "$dropin_tmp"
+
+    systemctl daemon-reload
+    systemctl restart cups.socket
+    systemctl restart cups.service
+    systemctl is-active --quiet cups.socket || die 'CUPS socket activation did not become active.'
+}
+
+verify_cups_tcp_listener() {
+    command -v ss >/dev/null 2>&1 || die 'The ss command is required to verify the CUPS TCP listener.'
+
+    if ! ss -ltnH | awk -v endpoint="$HOST_GATEWAY_IP:631" '$4 == endpoint {found=1} END {exit !found}'; then
+        die "CUPS TCP listener $HOST_GATEWAY_IP:631 is not present after socket activation. Inspect cups.socket and ss -ltn."
+    fi
+
+    log "CUPS TCP listener: $HOST_GATEWAY_IP:631"
 }
 
 verify_queue() {
@@ -296,16 +342,12 @@ verify_queue() {
 }
 
 verify_container_connectivity() {
-    command -v docker >/dev/null 2>&1 || {
-        log 'Docker is unavailable; skipped optional container-to-host CUPS connectivity verification.'
-        return
-    }
-    [[ -f $COMPOSE_FILE ]] || {
-        log "Compose file is unavailable at $COMPOSE_FILE; skipped optional container verification."
-        return
-    }
+    command -v docker >/dev/null 2>&1 \
+        || die 'Docker is required for container-to-host CUPS HTTP verification.'
+    [[ -f $COMPOSE_FILE ]] \
+        || die "Compose file is unavailable at $COMPOSE_FILE; cannot verify container HTTP access."
 
-    local running_service
+    local running_service http_status
     running_service=''
     for service in php worker; do
         if docker compose --project-directory "$DEPLOY_DIR" -f "$COMPOSE_FILE" ps --status running --services 2>/dev/null \
@@ -315,18 +357,39 @@ verify_container_connectivity() {
         fi
     done
 
-    if [[ -z $running_service ]]; then
-        log 'BakeDesk PHP/worker containers are not running; skipped optional container-to-host CUPS connectivity verification.'
-        return
+    [[ -n $running_service ]] \
+        || die 'BakeDesk PHP or worker container is not running; start the Compose stack before running setup-jadens.sh.'
+
+    if ! http_status=$(docker compose --project-directory "$DEPLOY_DIR" -f "$COMPOSE_FILE" exec -T "$running_service" php -r '
+        $url = "http://host.docker.internal:631/printers/bakedesk-label";
+        $curl = curl_init($url);
+        curl_setopt_array($curl, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 10,
+        ]);
+        $body = curl_exec($curl);
+        if ($body === false) {
+            fwrite(STDERR, "CUPS HTTP request failed: " . curl_error($curl) . "\n");
+            curl_close($curl);
+            exit(1);
+        }
+        $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        curl_close($curl);
+        printf("%d\n", $status);
+    '); then
+        die "Container $running_service could not connect to host.docker.internal:631 or complete the CUPS HTTP request."
     fi
 
-    if docker compose --project-directory "$DEPLOY_DIR" -f "$COMPOSE_FILE" exec -T "$running_service" php -r \
-        '$socket = @fsockopen("host.docker.internal", 631, $errno, $error, 5); if ($socket === false) { fwrite(STDERR, "TCP connection failed: $error ($errno)\\n"); exit(1); } fclose($socket);' \
-        >/dev/null; then
-        log "Container $running_service can reach host.docker.internal:631 over TCP."
-    else
-        die "Container $running_service could not reach host.docker.internal:631."
-    fi
+    http_status=${http_status//$'\r'/}
+    http_status=${http_status//$'\n'/}
+    [[ $http_status =~ ^[0-9]{3}$ ]] \
+        || die "Container $running_service returned an invalid HTTP status while checking the CUPS printer endpoint: ${http_status:-empty}."
+    [[ $http_status == 200 ]] \
+        || die "Container $running_service reached the CUPS printer endpoint, but it returned HTTP $http_status (expected HTTP 200)."
+
+    CONTAINER_HTTP_STATUS=$http_status
+    log "Container HTTP access: HTTP $CONTAINER_HTTP_STATUS"
 }
 
 submit_test_job() {
@@ -379,6 +442,8 @@ main() {
     printf 'Driver:\n  JADENS Linux Driver %s\n\n' "$DRIVER_VERSION"
     printf 'Device:\n  %s\n\n' "$SELECTED_DEVICE"
     printf 'CUPS queue:\n  %s\n\n' "$QUEUE_NAME"
+    printf 'CUPS TCP listener:\n  %s:631\n\n' "$HOST_GATEWAY_IP"
+    printf 'Container HTTP access:\n  HTTP %s\n\n' "$CONTAINER_HTTP_STATUS"
     printf 'Queue status:\n'
     lpstat -p "$QUEUE_NAME"
     lpstat -a "$QUEUE_NAME"
