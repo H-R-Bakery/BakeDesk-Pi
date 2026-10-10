@@ -75,6 +75,16 @@ restricted ownership and permissions; they must not be made world-writable.
 - The optional JADENS helper creates the `bakedesk-label` CUPS queue. BakeDesk
   uses host CUPS through
   `ipp://host.docker.internal:631/printers/bakedesk-label`.
+- The bundled JADENS filter requires the Debian 13/trixie package
+  `libcupsimage2t64`; `setup-jadens.sh` installs it and verifies the filter has
+  no unresolved shared-library dependencies.
+- `bakedesk-label` must be shared because BakeDesk connects from Docker. Queue
+  sharing does not imply unrestricted LAN access: the managed CUPS listener and
+  `/printers` ACL remain limited to localhost and the BakeDesk backend subnet,
+  and remote CUPS administration remains disabled.
+- `setup-jadens.sh` is intended to be rerunnable and must preserve its own
+  managed listener, socket drop-in, host alias, and `/printers` ACL on repeat
+  execution.
 - Vendor and model assumptions must not leak into BakeDesk application code.
 - A vendor driver package may only be stored in Git when its redistribution
   terms permit it.

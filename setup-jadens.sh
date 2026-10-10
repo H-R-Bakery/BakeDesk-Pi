@@ -10,6 +10,9 @@ readonly DEPLOY_DIR=${BAKEDESK_DEPLOY_DIR:-$SCRIPT_DIR}
 readonly DRIVER_PACKAGE=${JADENS_DRIVER_DEB:-$SCRIPT_DIR/vendor/jadens/jadens-printer-driver_linux_3.3.6.506.deb}
 readonly DRIVER_VERSION=3.3.6.506
 readonly DRIVER_PACKAGE_NAME=jadens-printer-driver
+readonly JADENS_FILTER=/usr/lib/cups/filter/jadens_printer_filter
+readonly JADENS_PPD=/usr/share/cups/model/Jadens/JD-668BT.ppd
+readonly JADENS_RUNTIME_PACKAGE=libcupsimage2t64
 readonly QUEUE_NAME=bakedesk-label
 readonly IPP_URI="ipp://host.docker.internal:631/printers/$QUEUE_NAME"
 readonly DOCKER_SUBNET=${BAKEDESK_DOCKER_SUBNET:-172.30.42.0/24}
@@ -19,10 +22,13 @@ readonly CUPSD_MARKER_END='# END BakeDesk JADENS access'
 readonly CUPSD_SOCKET_DROPIN_DIR=/etc/systemd/system/cups.socket.d
 readonly CUPSD_SOCKET_DROPIN=$CUPSD_SOCKET_DROPIN_DIR/bakedesk.conf
 readonly COMPOSE_FILE=$DEPLOY_DIR/compose.yaml
+readonly CUPS_IPPTOOL_TEST=/usr/share/cups/ipptool/get-printer-attributes.test
 
 TEST_PRINT=0
 HOST_GATEWAY_IP=''
 CONTAINER_HTTP_STATUS=''
+FILTER_DEPENDENCIES_STATUS=''
+MEDIA_SUMMARY=''
 
 log() {
     printf '[BakeDesk-Pi] %s\n' "$*"
@@ -69,7 +75,7 @@ check_host() {
 }
 
 ensure_cups() {
-    local required_commands=(lp lpinfo lpadmin lpoptions lpstat cupsenable cupsaccept)
+    local required_commands=(lp lpinfo lpadmin lpoptions lpstat cupsenable cupsaccept cupsctl ipptool)
     local missing=()
     local command_name
 
@@ -92,6 +98,12 @@ ensure_cups() {
     systemctl enable --now cups
     systemctl is-active --quiet cups || die 'CUPS is not active.'
     log 'CUPS is installed and active.'
+}
+
+ensure_jadens_runtime_dependencies() {
+    log "Installing the JADENS filter runtime dependency: $JADENS_RUNTIME_PACKAGE."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$JADENS_RUNTIME_PACKAGE"
 }
 
 inspect_driver_package() {
@@ -130,8 +142,31 @@ install_driver() {
         apt-get install -y "$DRIVER_PACKAGE"
     fi
 
-    [[ -x /usr/lib/cups/filter/jadens_printer_filter ]] \
+    [[ -x $JADENS_FILTER ]] \
         || die 'The JADENS CUPS raster filter was not installed.'
+    [[ -f $JADENS_PPD ]] \
+        || die "The JADENS JD-668BT PPD was not installed: $JADENS_PPD"
+}
+
+verify_filter_dependencies() {
+    local dependency_output unresolved
+
+    [[ -x $JADENS_FILTER ]] \
+        || die "The JADENS CUPS raster filter is missing or not executable: $JADENS_FILTER"
+
+    if ! dependency_output=$(ldd "$JADENS_FILTER" 2>&1); then
+        printf '%s\n' "$dependency_output" >&2
+        die 'Could not inspect the JADENS filter shared-library dependencies.'
+    fi
+
+    unresolved=$(grep -F 'not found' <<<"$dependency_output" || true)
+    if [[ -n $unresolved ]]; then
+        printf '%s\n' "$dependency_output" >&2
+        die 'The JADENS filter has unresolved shared-library dependencies.'
+    fi
+
+    FILTER_DEPENDENCIES_STATUS=OK
+    log 'JADENS filter dependencies: OK'
 }
 
 select_model() {
@@ -198,7 +233,7 @@ configure_queue() {
         -p "$QUEUE_NAME" \
         -v "$SELECTED_DEVICE" \
         -m "$SELECTED_MODEL" \
-        -o printer-is-shared=false
+        -o printer-is-shared=true
     cupsenable "$QUEUE_NAME"
     cupsaccept "$QUEUE_NAME"
 }
@@ -245,32 +280,116 @@ configure_media() {
     else
         log 'The installed driver does not expose an exact 4x6 media option; leaving the queue valid for manual media verification.'
     fi
+
+    verify_media_selection
 }
 
-configure_cups_access() {
-    [[ -f $CUPSD_CONF ]] || die "CUPS configuration file is missing: $CUPSD_CONF"
-    command -v docker >/dev/null 2>&1 || die 'Docker is required to determine the host-gateway address for container CUPS access.'
+verify_media_selection() {
+    local options line option values token value normalized is_default
+    local media_found=0 media_selected=0
 
-    HOST_GATEWAY_IP=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-    [[ $HOST_GATEWAY_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-        || die 'Could not determine Docker host-gateway IPv4 address from the default bridge.'
+    options=$(lpoptions -p "$QUEUE_NAME" -l)
+    while IFS= read -r line; do
+        [[ $line == *:* ]] || continue
+        option=${line%%:*}
+        option=${option%%/*}
+        option=${option//[[:space:]]/}
+        values=${line#*:}
+        for token in $values; do
+            value=${token%%/*}
+            is_default=0
+            if [[ $value == \** ]]; then
+                is_default=1
+                value=${value#\*}
+            fi
+            normalized=${value,,}
+            case $normalized in
+                4x6|4x6in|4x6inch|4x6inches|w288h432)
+                    media_found=1
+                    if ((is_default)); then
+                        media_selected=1
+                        MEDIA_SUMMARY="$option=$value"
+                    fi
+                    ;;
+            esac
+        done
+    done <<<"$options"
 
-    if grep -Eiq '^[[:space:]]*(Port[[:space:]]+631|Listen[[:space:]]+(\*|0\.0\.0\.0|::|\[::\])(:631)?[[:space:]]*$)' \
-        "$CUPSD_CONF"; then
-        die 'CUPS already has a broad port-631 listener. Refusing to change or broaden that configuration automatically.'
+    if (( ! media_found )); then
+        MEDIA_SUMMARY='not exposed by the installed driver'
+        log 'The installed driver does not expose an exact 4x6 media option.'
+    elif ((media_selected)); then
+        log "4x6 media selected: $MEDIA_SUMMARY"
+    else
+        die 'The installed driver exposes 4x6 media, but the queue did not select it.'
+    fi
+}
+
+validate_cups_listener_scope() {
+    local config_without_managed managed_block unsafe_listeners
+    config_without_managed=$(mktemp)
+    managed_block=$(mktemp)
+
+    if ! awk \
+        -v begin="$CUPSD_MARKER_BEGIN" \
+        -v end="$CUPSD_MARKER_END" \
+        -v outside="$config_without_managed" \
+        -v managed="$managed_block" '
+        $0 == begin {
+            if (inside || seen) {
+                invalid=1
+            }
+            inside=1
+            seen=1
+            print > managed
+            next
+        }
+        $0 == end {
+            if (!inside) {
+                invalid=1
+            }
+            print > managed
+            inside=0
+            next
+        }
+        inside {
+            print > managed
+            next
+        }
+        {
+            print > outside
+        }
+        END {
+            if (inside) {
+                invalid=1
+            }
+            exit invalid
+        }
+    ' "$CUPSD_CONF"; then
+        rm -f "$config_without_managed" "$managed_block"
+        return 2
     fi
 
-    if [[ ! -e ${CUPSD_CONF}.bakedesk-jadens-preinclude ]]; then
-        cp -a "$CUPSD_CONF" "${CUPSD_CONF}.bakedesk-jadens-preinclude"
-    fi
+    unsafe_listeners=$(grep -Ein \
+        '^[[:space:]]*(Port[[:space:]]+631|Listen[[:space:]]+(\*|0\.0\.0\.0|::|\[::\])(:631)?)([[:space:]]*(#.*)?)$' \
+        "$config_without_managed" "$managed_block" || true)
+    rm -f "$config_without_managed" "$managed_block"
 
+    if [[ -n $unsafe_listeners ]]; then
+        printf '%s\n' "$unsafe_listeners" >&2
+        return 1
+    fi
+}
+
+apply_managed_cups_config() {
     local config_tmp config_without_old_block combined_config
+
     config_tmp=$(mktemp)
     printf '%s\n' \
         "$CUPSD_MARKER_BEGIN" \
         '# Managed by BakeDesk-Pi setup-jadens.sh.' \
         "# host.docker.internal resolves to the Docker host gateway: $HOST_GATEWAY_IP" \
-        "# The Compose backend network is the only non-local client allowed to print." \
+        '# The Compose backend network is the only non-local client allowed to print.' \
         'ServerAlias host.docker.internal' \
         "Listen $HOST_GATEWAY_IP:631" \
         '<Location /printers>' \
@@ -297,11 +416,92 @@ configure_cups_access() {
     } >"$combined_config"
     install -o root -g root -m 0644 "$combined_config" "$CUPSD_CONF"
     rm -f "$config_tmp" "$config_without_old_block" "$combined_config"
+}
+
+verify_managed_cups_access() {
+    local managed_config required_line
+    managed_config=$(awk -v begin="$CUPSD_MARKER_BEGIN" -v end="$CUPSD_MARKER_END" '
+        $0 == begin { inside=1 }
+        inside { print }
+        $0 == end { inside=0 }
+    ' "$CUPSD_CONF")
+
+    [[ -n $managed_config ]] \
+        || die 'The BakeDesk-managed CUPS access block is missing.'
+
+    local required_lines=(
+        "$CUPSD_MARKER_BEGIN"
+        'ServerAlias host.docker.internal'
+        "Listen $HOST_GATEWAY_IP:631"
+        '<Location /printers>'
+        '  Order allow,deny'
+        '  Allow from 127.0.0.1'
+        '  Allow from ::1'
+        "  Allow from $DOCKER_SUBNET"
+        '</Location>'
+        "$CUPSD_MARKER_END"
+    )
+    for required_line in "${required_lines[@]}"; do
+        grep -Fqx -- "$required_line" <<<"$managed_config" \
+            || die "The BakeDesk-managed CUPS access block is incomplete: $required_line"
+    done
+}
+
+enable_cups_printer_sharing() {
+    local settings share_printers remote_any remote_admin
+
+    cupsctl --share-printers \
+        || die 'Could not enable CUPS server-side printer sharing.'
+    settings=$(cupsctl) \
+        || die 'Could not inspect CUPS server sharing settings.'
+
+    share_printers=$(awk -F= '$1 == "_share_printers" {print $2}' <<<"$settings")
+    remote_any=$(awk -F= '$1 == "_remote_any" {print $2}' <<<"$settings")
+    remote_admin=$(awk -F= '$1 == "_remote_admin" {print $2}' <<<"$settings")
+
+    [[ $share_printers == 1 ]] \
+        || die 'CUPS server-side printer sharing is not enabled after cupsctl --share-printers.'
+    [[ $remote_any != 1 ]] \
+        || die 'CUPS remote-any access is enabled; refusing to continue with unrestricted printing.'
+    [[ $remote_admin != 1 ]] \
+        || die 'CUPS remote administration is enabled; refusing to continue.'
+
+    log 'CUPS server-side printer sharing: enabled.'
+    log 'CUPS remote-any printing and remote administration remain disabled.'
+}
+
+configure_cups_access() {
+    [[ -f $CUPSD_CONF ]] || die "CUPS configuration file is missing: $CUPSD_CONF"
+    command -v docker >/dev/null 2>&1 || die 'Docker is required to determine the host-gateway address for container CUPS access.'
+
+    HOST_GATEWAY_IP=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    [[ $HOST_GATEWAY_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+        || die 'Could not determine Docker host-gateway IPv4 address from the default bridge.'
+
+    if ! validate_cups_listener_scope; then
+        die 'CUPS has a malformed BakeDesk-managed block or a genuinely broad pre-existing port-631 listener. Refusing to change or broaden that configuration automatically.'
+    fi
+
+    if [[ ! -e ${CUPSD_CONF}.bakedesk-jadens-preinclude ]]; then
+        cp -a "$CUPSD_CONF" "${CUPSD_CONF}.bakedesk-jadens-preinclude"
+    fi
+
+    apply_managed_cups_config
 
     cupsd -t || die 'The generated CUPS configuration failed validation; CUPS was not restarted.'
     configure_cups_socket_activation
+    enable_cups_printer_sharing
+
+    if ! validate_cups_listener_scope; then
+        die 'cupsctl --share-printers introduced or exposed a broad CUPS listener; refusing to continue.'
+    fi
+    apply_managed_cups_config
+    verify_managed_cups_access
+    cupsd -t || die 'The final CUPS configuration failed validation; CUPS was not restarted.'
+    configure_cups_socket_activation
     systemctl is-active --quiet cups || die 'CUPS did not become active after applying Docker access rules.'
     verify_cups_tcp_listener
+    verify_managed_cups_access
     log "Printer access is limited to $DOCKER_SUBNET and localhost."
     log 'CUPS administration remains governed by the existing local/admin access rules.'
 }
@@ -336,9 +536,45 @@ verify_cups_tcp_listener() {
 }
 
 verify_queue() {
+    local printer_status accepting_status
+
     log 'Final CUPS queue verification:'
-    lpstat -t
+    printer_status=$(lpstat -p "$QUEUE_NAME") \
+        || die "CUPS queue does not exist: $QUEUE_NAME"
+    accepting_status=$(lpstat -a "$QUEUE_NAME") \
+        || die "CUPS queue is not accepting jobs: $QUEUE_NAME"
+
+    grep -Eiq '[[:space:]]enabled([[:space:]]|$)' <<<"$printer_status" \
+        || die "CUPS queue is not enabled: $QUEUE_NAME"
+    grep -Eiq 'accepting requests' <<<"$accepting_status" \
+        || die "CUPS queue is not accepting jobs: $QUEUE_NAME"
+
+    printf '%s\n' "$printer_status" "$accepting_status"
     lpoptions -p "$QUEUE_NAME" -l
+    verify_queue_sharing
+    log 'CUPS queue status: enabled and accepting jobs.'
+}
+
+verify_queue_sharing() {
+    local attributes
+
+    [[ -f $CUPS_IPPTOOL_TEST ]] \
+        || die "The CUPS IPP attribute test is unavailable: $CUPS_IPPTOOL_TEST"
+
+    if ! attributes=$(ipptool -4 -t -v -T 10 \
+        "ipp://127.0.0.1:631/printers/$QUEUE_NAME" \
+        "$CUPS_IPPTOOL_TEST" 2>&1); then
+        printf '%s\n' "$attributes" >&2
+        die "Could not query CUPS state for queue sharing: $QUEUE_NAME"
+    fi
+
+    if ! grep -Eiq 'printer-is-shared.*(true|1)' <<<"$attributes"; then
+        printf '%s\n' "$attributes" >&2
+        die "CUPS queue $QUEUE_NAME is not shared."
+    fi
+
+    log 'CUPS queue sharing:'
+    log "  $QUEUE_NAME: shared"
 }
 
 verify_container_connectivity() {
@@ -425,7 +661,9 @@ main() {
     check_host
     inspect_driver_package
     ensure_cups
+    ensure_jadens_runtime_dependencies
     install_driver
+    verify_filter_dependencies
     select_model
     select_device
     configure_queue
@@ -440,8 +678,11 @@ main() {
 
     printf '\nJADENS printer setup complete.\n\n'
     printf 'Driver:\n  JADENS Linux Driver %s\n\n' "$DRIVER_VERSION"
+    printf 'Filter dependencies:\n  %s\n\n' "$FILTER_DEPENDENCIES_STATUS"
     printf 'Device:\n  %s\n\n' "$SELECTED_DEVICE"
     printf 'CUPS queue:\n  %s\n\n' "$QUEUE_NAME"
+    printf 'Queue sharing:\n  shared\n\n'
+    printf 'Media:\n  %s\n\n' "$MEDIA_SUMMARY"
     printf 'CUPS TCP listener:\n  %s:631\n\n' "$HOST_GATEWAY_IP"
     printf 'Container HTTP access:\n  HTTP %s\n\n' "$CONTAINER_HTTP_STATUS"
     printf 'Queue status:\n'

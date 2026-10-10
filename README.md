@@ -71,17 +71,27 @@ https://cdn.shopify.com/s/files/1/0574/8742/5675/files/jadens-printer-driver_lin
 The Debian package metadata contains no license, copyright notice, or explicit
 redistribution permission.
 
+On Debian 13/Raspberry Pi OS trixie, the bundled JADENS filter also requires
+the distribution package `libcupsimage2t64`. The helper installs this runtime
+dependency and runs `ldd` on the installed filter, failing with the unresolved
+libraries if any are still missing.
+
 The resulting URI to enter in BakeDesk is:
 
 ```text
 ipp://host.docker.internal:631/printers/bakedesk-label
 ```
 
-Enter it in `BakeDesk → Admin → Printers`. The helper uses an exact 4×6
-media option when the installed driver exposes one; otherwise it leaves the
-queue valid and reports that media sizing needs verification. The default run
-does not submit a physical print job. An explicit diagnostic job can be
-submitted with:
+Enter it in `BakeDesk → Admin → Printers`. Because BakeDesk connects from a
+Docker container, `bakedesk-label` is shared explicitly. Queue sharing is
+limited by the helper’s CUPS listener and `/printers` ACL to localhost and the
+Compose backend subnet; it does not enable unrestricted LAN access or remote
+CUPS administration. The helper uses an exact 4×6 media option when the
+installed driver exposes one, including `PageSize=w288h432` when provided by
+the JD-668BT driver.
+
+The default run does not submit a physical print job. An explicit diagnostic
+job can be submitted with:
 
 ```bash
 sudo ./setup-jadens.sh --test
@@ -101,7 +111,10 @@ sudo lpadmin -x bakedesk-label
 sudo ./setup-jadens.sh
 ```
 
-The Compose backend network uses the stable private subnet
+The helper is intended to be rerunnable. It updates the existing queue and
+reapplies its marked CUPS access block without rejecting the listener and ACL
+configuration that it previously created. The Compose backend network uses
+the stable private subnet
 `172.30.42.0/24`. The optional helper configures CUPS to listen on the Docker
 host-gateway address and permits `/printers` access only from localhost and
 that backend subnet. On Debian/Raspberry Pi OS with systemd socket activation,
@@ -113,6 +126,10 @@ through `ServerAlias`. The helper verifies the actual TCP listener and checks
 the queue endpoint from a running BakeDesk PHP or worker container. CUPS
 administration is left under the existing local administrative access rules,
 and no LAN-wide CUPS administration is enabled.
+
+After setup, the final end-to-end check is `BakeDesk → Admin → Printers → Test
+Label`. This exercises the production path through the PHP/worker container,
+host CUPS, the JADENS driver, and the USB printer.
 
 ## Updates and checks
 
