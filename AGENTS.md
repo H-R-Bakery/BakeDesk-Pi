@@ -70,11 +70,17 @@ restricted ownership and permissions; they must not be made world-writable.
 - Do not add Kubernetes, Swarm, Traefik, Apache, Redis, RabbitMQ, another
   reverse proxy, backup/restore tooling, reboot controls, or the future
   `/menu/{id}` feature here.
-- Do not add vendor-specific printer configuration. Configure printers later
-  through BakeDesk using IPP. Useful host checks are `systemctl status cups`
-  and `lpstat -t`.
-- Do not broaden CUPS listening or firewall access unless a deliberate future
-  CUPS queue integration requires it.
+- Keep generic `setup.sh` vendor-neutral. Vendor-specific printer provisioning
+  may live in optional top-level helper scripts.
+- The optional JADENS helper creates the `bakedesk-label` CUPS queue. BakeDesk
+  uses host CUPS through
+  `ipp://host.docker.internal:631/printers/bakedesk-label`.
+- Vendor and model assumptions must not leak into BakeDesk application code.
+- A vendor driver package may only be stored in Git when its redistribution
+  terms permit it.
+- CUPS access from Docker must be narrowly scoped and must not enable LAN-wide
+  administration. Useful host checks are `systemctl status cups`, `lpstat -t`,
+  and `lpoptions -p bakedesk-label -l`.
 - The deployment environment file contains secrets and is ignored by Git. Keep
   it readable only by the deployment operator and the root-owned deployment
   process as appropriate.

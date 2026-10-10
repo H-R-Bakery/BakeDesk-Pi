@@ -46,6 +46,64 @@ is `/opt/bakedesk`; `deploy/docker/php/Dockerfile` copies only the application
 checkout needed for the image. Persistent data is bind-mounted from
 `/opt/bakedesk/data`.
 
+## Optional JADENS label printer setup
+
+The generic deployment remains printer-vendor-neutral. The optional
+`setup-jadens.sh` helper provisions a locally connected JADENS JD-668BT printer
+through host CUPS:
+
+```bash
+sudo ./setup-jadens.sh
+```
+
+It installs and verifies JADENS Linux Driver `3.3.6.506`, discovers the
+JADENS model and device URI from CUPS, and creates or updates the predictable
+queue `bakedesk-label`. The original vendor download URL for this exact
+driver is:
+
+```text
+https://cdn.shopify.com/s/files/1/0574/8742/5675/files/jadens-printer-driver_linux_3.3.6.506.deb?v=1779691150
+```
+
+The Debian package metadata contains no license, copyright notice, or explicit
+redistribution permission.
+
+The resulting URI to enter in BakeDesk is:
+
+```text
+ipp://host.docker.internal:631/printers/bakedesk-label
+```
+
+Enter it in `BakeDesk → Admin → Printers`. The helper uses an exact 4×6
+media option when the installed driver exposes one; otherwise it leaves the
+queue valid and reports that media sizing needs verification. The default run
+does not submit a physical print job. An explicit diagnostic job can be
+submitted with:
+
+```bash
+sudo ./setup-jadens.sh --test
+```
+
+Inspect the queue with:
+
+```bash
+lpstat -t
+lpoptions -p bakedesk-label -l
+```
+
+To remove and recreate the queue while troubleshooting:
+
+```bash
+sudo lpadmin -x bakedesk-label
+sudo ./setup-jadens.sh
+```
+
+The Compose backend network uses the stable private subnet
+`172.30.42.0/24`. The optional helper configures CUPS to listen on the Docker
+host-gateway address and permits `/printers` access only from localhost and
+that backend subnet. CUPS administration is left under the existing local
+administrative access rules, and no LAN-wide CUPS administration is enabled.
+
 ## Updates and checks
 
 ```bash
@@ -68,9 +126,8 @@ docker compose --project-directory /opt/bakedesk/deploy -f /opt/bakedesk/deploy/
 ```
 
 Configure printers later in BakeDesk with IPP addresses such as the printer’s
-direct IPP endpoint. A future CUPS queue can also be used through IPP, but
-making a host CUPS listener reachable from containers requires an intentional
-host listener/firewall change and is not enabled by this bootstrap.
+direct IPP endpoint. Vendor-specific host printer provisioning is optional and
+is kept out of `setup.sh` and the BakeDesk application.
 
 Valkey is an in-memory Messenger queue transport. PostgreSQL is the durable
 application store, and generated documents are stored in

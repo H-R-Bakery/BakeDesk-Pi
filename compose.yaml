@@ -167,3 +167,8 @@ volumes:
 networks:
   frontend:
   backend:
+    driver: bridge
+    ipam:
+      config:
+        # Stable private subnet used by the optional host-CUPS access rule.
+        - subnet: 172.30.42.0/24
