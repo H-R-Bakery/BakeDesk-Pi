@@ -46,7 +46,7 @@ services:
       - php
       - bin/console
       - messenger:consume
-      - print
+      - --all
       - --no-interaction
       - --memory-limit=128M
       - --time-limit=3600
