@@ -34,6 +34,8 @@ Review `/opt/bakedesk/deploy/.env` after setup. Setup creates it from
 `.env.example` with random local secrets when it is missing. It is ignored by
 Git and must remain private.
 
+Reboot the host after setup.
+
 Start the production stack with:
 
 ```bash
