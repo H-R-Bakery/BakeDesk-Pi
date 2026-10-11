@@ -15,6 +15,7 @@ RUN apt-get update \
         libxml2-dev \
         libzip-dev \
         unzip \
+        nano \
         $PHPIZE_DEPS \
     && docker-php-ext-install -j"$(nproc)" \
         curl \
