@@ -85,12 +85,12 @@ ipp://host.docker.internal:631/printers/bakedesk-label
 ```
 
 Enter it in `BakeDesk → Admin → Printers`. Because BakeDesk connects from a
-Docker container, `bakedesk-label` is shared explicitly. Queue sharing is
-limited by the helper’s CUPS listener and `/printers` ACL to localhost and the
-Compose backend subnet; it does not enable unrestricted LAN access or remote
-CUPS administration. The helper uses an exact 4×6 media option when the
-installed driver exposes one, including `PageSize=w288h432` when provided by
-the JD-668BT driver.
+Docker container, the helper sets `printer-is-shared=true` directly on
+`bakedesk-label`. Queue sharing is limited by the helper’s CUPS listener and
+`/printers` ACL to localhost and the Compose backend subnet; it does not enable
+unrestricted LAN access or remote CUPS administration. The helper uses an
+exact 4×6 media option when the installed driver exposes one, including
+`PageSize=w288h432` when provided by the JD-668BT driver.
 
 The default run does not submit a physical print job. An explicit diagnostic
 job can be submitted with:
@@ -115,8 +115,12 @@ sudo ./setup-jadens.sh
 
 The helper is intended to be rerunnable. It updates the existing queue and
 reapplies its marked CUPS access block without rejecting the listener and ACL
-configuration that it previously created. The Compose backend network uses
-the stable private subnet
+configuration that it previously created. If an earlier failed helper run
+left the known broad `Port 631` line behind, the helper removes it only when
+the legacy managed-state marker is absent and the pre-change backup proves
+that it was the sole non-managed configuration difference. Other broad or
+administrator-defined listeners still stop setup for review. The Compose
+backend network uses the stable private subnet
 `172.30.42.0/24`. The optional helper configures CUPS to listen on the Docker
 host-gateway address and permits `/printers` access only from localhost and
 that backend subnet. On Debian/Raspberry Pi OS with systemd socket activation,
@@ -124,10 +128,12 @@ the helper manages
 `/etc/systemd/system/cups.socket.d/bakedesk.conf`, retaining the vendor
 `/run/cups/cups.sock` while adding only the localhost and Docker host-gateway
 TCP listeners. It explicitly accepts the `host.docker.internal` CUPS host name
-through `ServerAlias`. The helper verifies the actual TCP listener and checks
-the queue endpoint from a running BakeDesk PHP or worker container. CUPS
-administration is left under the existing local administrative access rules,
-and no LAN-wide CUPS administration is enabled.
+through `ServerAlias`. The helper verifies the actual TCP listeners, the
+inherited `/run/cups/cups.sock`, and the queue endpoint from a running BakeDesk
+PHP or worker container. It also sends a non-printing IPP `Validate-Job`
+request through that container to verify remote print authorization without
+creating a job. CUPS administration is left under the existing local
+administrative access rules, and no LAN-wide CUPS administration is enabled.
 
 After setup, the final end-to-end check is `BakeDesk → Admin → Printers → Test
 Label`. This exercises the production path through the PHP/worker container,

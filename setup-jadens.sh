@@ -19,6 +19,8 @@ readonly DOCKER_SUBNET=${BAKEDESK_DOCKER_SUBNET:-172.30.42.0/24}
 readonly CUPSD_CONF=/etc/cups/cupsd.conf
 readonly CUPSD_MARKER_BEGIN='# BEGIN BakeDesk JADENS access'
 readonly CUPSD_MARKER_END='# END BakeDesk JADENS access'
+readonly CUPSD_PRECHANGE_BACKUP=${CUPSD_CONF}.bakedesk-jadens-preinclude
+readonly CUPSD_MANAGED_STATE=/etc/cups/bakedesk-jadens-managed
 readonly CUPSD_SOCKET_DROPIN_DIR=/etc/systemd/system/cups.socket.d
 readonly CUPSD_SOCKET_DROPIN=$CUPSD_SOCKET_DROPIN_DIR/bakedesk.conf
 readonly COMPOSE_FILE=$DEPLOY_DIR/compose.yaml
@@ -27,6 +29,7 @@ readonly CUPS_IPPTOOL_TEST=/usr/share/cups/ipptool/get-printer-attributes.test
 TEST_PRINT=0
 HOST_GATEWAY_IP=''
 CONTAINER_HTTP_STATUS=''
+CONTAINER_IPP_AUTHORIZATION_STATUS=''
 FILTER_DEPENDENCIES_STATUS=''
 MEDIA_SUMMARY=''
 
@@ -75,7 +78,7 @@ check_host() {
 }
 
 ensure_cups() {
-    local required_commands=(lp lpinfo lpadmin lpoptions lpstat cupsenable cupsaccept cupsctl ipptool)
+    local required_commands=(lp lpinfo lpadmin lpoptions lpstat cupsenable cupsaccept ipptool)
     local missing=()
     local command_name
 
@@ -234,6 +237,7 @@ configure_queue() {
         -v "$SELECTED_DEVICE" \
         -m "$SELECTED_MODEL" \
         -o printer-is-shared=true
+    log "$QUEUE_NAME queue sharing: printer-is-shared=true"
     cupsenable "$QUEUE_NAME"
     cupsaccept "$QUEUE_NAME"
 }
@@ -381,6 +385,67 @@ validate_cups_listener_scope() {
     fi
 }
 
+strip_managed_cups_config() {
+    local source_file=$1
+    local destination_file=$2
+    local remove_legacy_port=${3:-0}
+
+    awk \
+        -v begin="$CUPSD_MARKER_BEGIN" \
+        -v end="$CUPSD_MARKER_END" \
+        -v remove_legacy_port="$remove_legacy_port" \
+        '
+        $0 == begin { inside=1; next }
+        inside && $0 == end { inside=0; next }
+        inside { next }
+        remove_legacy_port && $0 ~ /^[[:space:]]*Port[[:space:]]+631([[:space:]]*(#.*)?)?$/ { next }
+        { print }
+        END {
+            if (inside) {
+                exit 1
+            }
+        }
+    ' "$source_file" >"$destination_file"
+}
+
+recover_previous_broad_listener() {
+    local current_without_managed current_baseline backup_baseline
+
+    [[ -f $CUPSD_PRECHANGE_BACKUP ]] || return 0
+    [[ ! -e $CUPSD_MANAGED_STATE ]] || return 0
+    grep -Fqx "$CUPSD_MARKER_BEGIN" "$CUPSD_CONF" || return 0
+    grep -Eq '^[[:space:]]*Port[[:space:]]+631([[:space:]]*(#.*)?)?$' "$CUPSD_CONF" \
+        || return 0
+
+    current_without_managed=$(mktemp)
+    current_baseline=$(mktemp)
+    backup_baseline=$(mktemp)
+
+    if ! strip_managed_cups_config "$CUPSD_CONF" "$current_without_managed"; then
+        rm -f "$current_without_managed" "$current_baseline" "$backup_baseline"
+        return 0
+    fi
+    if ! strip_managed_cups_config "$CUPSD_CONF" "$current_baseline" 1 \
+        || ! strip_managed_cups_config "$CUPSD_PRECHANGE_BACKUP" "$backup_baseline"; then
+        rm -f "$current_without_managed" "$current_baseline" "$backup_baseline"
+        return 0
+    fi
+
+    if cmp -s "$current_baseline" "$backup_baseline"; then
+        local cleaned_config
+        cleaned_config=$(mktemp)
+        awk '
+            $0 ~ /^[[:space:]]*Port[[:space:]]+631([[:space:]]*(#.*)?)?$/ { next }
+            { print }
+        ' "$CUPSD_CONF" >"$cleaned_config"
+        install -o root -g root -m 0644 "$cleaned_config" "$CUPSD_CONF"
+        rm -f "$cleaned_config"
+        log 'Removed the legacy broad CUPS listener left by the previous failed BakeDesk setup.'
+    fi
+
+    rm -f "$current_without_managed" "$current_baseline" "$backup_baseline"
+}
+
 apply_managed_cups_config() {
     local config_tmp config_without_old_block combined_config
 
@@ -447,29 +512,6 @@ verify_managed_cups_access() {
     done
 }
 
-enable_cups_printer_sharing() {
-    local settings share_printers remote_any remote_admin
-
-    cupsctl --share-printers \
-        || die 'Could not enable CUPS server-side printer sharing.'
-    settings=$(cupsctl) \
-        || die 'Could not inspect CUPS server sharing settings.'
-
-    share_printers=$(awk -F= '$1 == "_share_printers" {print $2}' <<<"$settings")
-    remote_any=$(awk -F= '$1 == "_remote_any" {print $2}' <<<"$settings")
-    remote_admin=$(awk -F= '$1 == "_remote_admin" {print $2}' <<<"$settings")
-
-    [[ $share_printers == 1 ]] \
-        || die 'CUPS server-side printer sharing is not enabled after cupsctl --share-printers.'
-    [[ $remote_any != 1 ]] \
-        || die 'CUPS remote-any access is enabled; refusing to continue with unrestricted printing.'
-    [[ $remote_admin != 1 ]] \
-        || die 'CUPS remote administration is enabled; refusing to continue.'
-
-    log 'CUPS server-side printer sharing: enabled.'
-    log 'CUPS remote-any printing and remote administration remain disabled.'
-}
-
 configure_cups_access() {
     [[ -f $CUPSD_CONF ]] || die "CUPS configuration file is missing: $CUPSD_CONF"
     command -v docker >/dev/null 2>&1 || die 'Docker is required to determine the host-gateway address for container CUPS access.'
@@ -478,30 +520,29 @@ configure_cups_access() {
     [[ $HOST_GATEWAY_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
         || die 'Could not determine Docker host-gateway IPv4 address from the default bridge.'
 
+    recover_previous_broad_listener
+
     if ! validate_cups_listener_scope; then
         die 'CUPS has a malformed BakeDesk-managed block or a genuinely broad pre-existing port-631 listener. Refusing to change or broaden that configuration automatically.'
     fi
 
-    if [[ ! -e ${CUPSD_CONF}.bakedesk-jadens-preinclude ]]; then
-        cp -a "$CUPSD_CONF" "${CUPSD_CONF}.bakedesk-jadens-preinclude"
+    if [[ ! -e $CUPSD_PRECHANGE_BACKUP ]]; then
+        cp -a "$CUPSD_CONF" "$CUPSD_PRECHANGE_BACKUP"
     fi
 
     apply_managed_cups_config
+    verify_managed_cups_access
 
     cupsd -t || die 'The generated CUPS configuration failed validation; CUPS was not restarted.'
     configure_cups_socket_activation
-    enable_cups_printer_sharing
 
-    if ! validate_cups_listener_scope; then
-        die 'cupsctl --share-printers introduced or exposed a broad CUPS listener; refusing to continue.'
-    fi
-    apply_managed_cups_config
-    verify_managed_cups_access
-    cupsd -t || die 'The final CUPS configuration failed validation; CUPS was not restarted.'
-    configure_cups_socket_activation
+    validate_cups_listener_scope \
+        || die 'CUPS has a broad port-631 listener after applying the BakeDesk configuration; refusing to continue.'
     systemctl is-active --quiet cups || die 'CUPS did not become active after applying Docker access rules.'
     verify_cups_tcp_listener
+    verify_cups_unix_socket
     verify_managed_cups_access
+    install -o root -g root -m 0644 /dev/null "$CUPSD_MANAGED_STATE"
     log "Printer access is limited to $DOCKER_SUBNET and localhost."
     log 'CUPS administration remains governed by the existing local/admin access rules.'
 }
@@ -525,6 +566,17 @@ configure_cups_socket_activation() {
     systemctl is-active --quiet cups.socket || die 'CUPS socket activation did not become active.'
 }
 
+verify_cups_unix_socket() {
+    [[ -S /run/cups/cups.sock ]] \
+        || die 'The inherited CUPS Unix socket /run/cups/cups.sock is not active.'
+
+    if grep -Eq '^[[:space:]]*ListenStream[[:space:]]*=[[:space:]]*$' "$CUPSD_SOCKET_DROPIN"; then
+        die 'The BakeDesk CUPS socket drop-in resets inherited ListenStream entries.'
+    fi
+
+    log 'CUPS Unix socket: /run/cups/cups.sock'
+}
+
 verify_cups_tcp_listener() {
     command -v ss >/dev/null 2>&1 || die 'The ss command is required to verify the CUPS TCP listener.'
 
@@ -532,7 +584,17 @@ verify_cups_tcp_listener() {
         die "CUPS TCP listener $HOST_GATEWAY_IP:631 is not present after socket activation. Inspect cups.socket and ss -ltn."
     fi
 
-    log "CUPS TCP listener: $HOST_GATEWAY_IP:631"
+    if ! ss -ltnH | awk '$4 == "127.0.0.1:631" {found=1} END {exit !found}'; then
+        die 'CUPS localhost TCP listener 127.0.0.1:631 is not present after socket activation.'
+    fi
+
+    if ss -ltnH | awk '$4 == "0.0.0.0:631" || $4 == "*:631" || $4 == "[::]:631" {found=1} END {exit found}'; then
+        :
+    else
+        die 'CUPS has a wildcard TCP listener on port 631; refusing to continue.'
+    fi
+
+    log "CUPS TCP listeners: 127.0.0.1:631 and $HOST_GATEWAY_IP:631"
 }
 
 verify_queue() {
@@ -626,6 +688,67 @@ verify_container_connectivity() {
 
     CONTAINER_HTTP_STATUS=$http_status
     log "Container HTTP access: HTTP $CONTAINER_HTTP_STATUS"
+
+    verify_container_ipp_authorization "$running_service"
+}
+
+verify_container_ipp_authorization() {
+    local running_service=$1 ipp_result
+
+    if ! ipp_result=$(docker compose --project-directory "$DEPLOY_DIR" -f "$COMPOSE_FILE" exec -T "$running_service" php -r '
+        $printer_uri = "ipp://host.docker.internal:631/printers/bakedesk-label";
+        $url = "http://host.docker.internal:631/printers/bakedesk-label";
+        $attribute = static function (int $tag, string $name, string $value): string {
+            return pack("Cn", $tag, strlen($name)) . $name . pack("n", strlen($value)) . $value;
+        };
+        $body = pack("nnN", 0x0101, 0x0004, 1)
+            . chr(0x01)
+            . $attribute(0x47, "attributes-charset", "utf-8")
+            . $attribute(0x48, "attributes-natural-language", "en")
+            . $attribute(0x45, "printer-uri", $printer_uri)
+            . $attribute(0x42, "requesting-user-name", "bakedesk-ipp-check")
+            . $attribute(0x49, "document-format", "application/pdf")
+            . chr(0x02)
+            . chr(0x21) . pack("n", 6) . "copies" . pack("N", 1);
+
+        $curl = curl_init($url);
+        curl_setopt_array($curl, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => [
+                "Content-Type: application/ipp",
+                "Accept: application/ipp",
+            ],
+        ]);
+        $response = curl_exec($curl);
+        if ($response === false) {
+            fwrite(STDERR, "IPP Validate-Job request failed: " . curl_error($curl) . "\n");
+            curl_close($curl);
+            exit(1);
+        }
+        $http_status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        curl_close($curl);
+        if ($http_status !== 200 || strlen($response) < 4) {
+            fwrite(STDERR, "IPP Validate-Job returned HTTP " . $http_status . " with an invalid response.\n");
+            exit(1);
+        }
+        $ipp_status = unpack("nstatus", substr($response, 2, 2))["status"];
+        if ($ipp_status !== 0x0000 && $ipp_status !== 0x0001) {
+            printf("IPP Validate-Job status: 0x%04x\n", $ipp_status);
+            exit(1);
+        }
+        printf("IPP Validate-Job status: 0x%04x\n", $ipp_status);
+    ' 2>&1); then
+        printf '%s\n' "$ipp_result" >&2
+        die "Container $running_service could not complete the non-printing IPP authorization check."
+    fi
+
+    printf '%s\n' "$ipp_result"
+    CONTAINER_IPP_AUTHORIZATION_STATUS=OK
+    log 'Container IPP authorization: Validate-Job accepted without creating a print job.'
 }
 
 submit_test_job() {
@@ -659,9 +782,9 @@ main() {
 
     require_root
     check_host
-    inspect_driver_package
     ensure_cups
     ensure_jadens_runtime_dependencies
+    inspect_driver_package
     install_driver
     verify_filter_dependencies
     select_model
@@ -683,8 +806,9 @@ main() {
     printf 'CUPS queue:\n  %s\n\n' "$QUEUE_NAME"
     printf 'Queue sharing:\n  shared\n\n'
     printf 'Media:\n  %s\n\n' "$MEDIA_SUMMARY"
-    printf 'CUPS TCP listener:\n  %s:631\n\n' "$HOST_GATEWAY_IP"
+    printf 'CUPS TCP listeners:\n  127.0.0.1:631\n  %s:631\n\n' "$HOST_GATEWAY_IP"
     printf 'Container HTTP access:\n  HTTP %s\n\n' "$CONTAINER_HTTP_STATUS"
+    printf 'Container IPP authorization:\n  %s\n\n' "$CONTAINER_IPP_AUTHORIZATION_STATUS"
     printf 'Queue status:\n'
     lpstat -p "$QUEUE_NAME"
     lpstat -a "$QUEUE_NAME"
