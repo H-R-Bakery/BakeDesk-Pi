@@ -177,7 +177,7 @@ main() {
     tar -C "$DOCUMENTS_DIR" -cf - . | tar -C "$STAGING_DIR/documents" -xf -
 
     cp -- "$ENV_FILE" "$STAGING_DIR/deploy.env"
-    chmod 0600 "$STAGING_DIR/deploy.env"
+    chmod 0660 "$STAGING_DIR/deploy.env"
 
     app_commit=$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null) \
         || die 'Could not determine the BakeDesk Git commit.'
@@ -214,7 +214,7 @@ main() {
     log "Creating $FINAL_ARCHIVE."
     tar -C "$STAGING_DIR" -czf "$TEMP_ARCHIVE" .
     tar -tzf "$TEMP_ARCHIVE" >/dev/null
-    chmod 0600 "$TEMP_ARCHIVE"
+    chmod 0660 "$TEMP_ARCHIVE"
     restore_worker || die 'The backup completed but the print worker could not be restarted.'
     mv -- "$TEMP_ARCHIVE" "$FINAL_ARCHIVE"
     TEMP_ARCHIVE=''
