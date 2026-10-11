@@ -379,7 +379,7 @@ main() {
     local current_password=$ENV_VALUE
     [[ -n $current_password ]] || die 'The current deployment POSTGRES_PASSWORD must not be empty.'
     cp -- "$ENV_FILE" "$current_env"
-    chmod 0600 "$current_env"
+    chmod 0660 "$current_env"
     confirm_restore "$archive"
 
     local current_env_uid current_env_gid documents_rollback_dir
@@ -425,8 +425,8 @@ main() {
     DOCUMENTS_SWAPPED=1
     mv -- "$extract_dir/documents" "$DOCUMENTS_DIR"
     chown -R 33:33 "$DOCUMENTS_DIR"
-    find "$DOCUMENTS_DIR" -type d -exec chmod 0750 {} +
-    find "$DOCUMENTS_DIR" -type f -exec chmod 0640 {} +
+    find "$DOCUMENTS_DIR" -type d -exec chmod 0770 {} +
+    find "$DOCUMENTS_DIR" -type f -exec chmod 0660 {} +
 
     log 'Running deploy.sh to apply current migrations, reconcile timers, and start the application.'
     "$DEPLOY_DIR/deploy.sh"
