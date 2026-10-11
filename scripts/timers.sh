@@ -71,13 +71,15 @@ validate_runtime_configuration() {
 
 ensure_backup_directory() {
     local backup_directory=$1
+    local backup_mode
 
-    install -d -o root -g root -m 0700 "$backup_directory"
+    install -d -o root -g root -m 0770 "$backup_directory"
     chown root:root "$backup_directory"
-    chmod 0700 "$backup_directory"
+    chmod 0770 "$backup_directory"
     [[ $(stat -c '%u' "$backup_directory") == 0 ]] \
         || die "Backup directory is not root-owned: $backup_directory"
-    [[ $(( $(stat -c '%a' "$backup_directory") & 077 )) -eq 0 ]] \
+    backup_mode=$(stat -c '%a' "$backup_directory")
+    [[ $(( 8#$backup_mode & 007 )) -eq 0 ]] \
         || die "Backup directory permissions are too broad: $backup_directory"
 }
 
