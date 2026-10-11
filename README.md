@@ -195,3 +195,155 @@ Valkey is an in-memory Messenger queue transport. PostgreSQL is the durable
 application store, and generated documents are stored in
 `/opt/bakedesk/data/documents`. Mercure uses transient hub state in this
 configuration, so no Mercure data directory is created.
+
+## Backup configuration
+
+Backups are owned by BakeDesk-Pi and contain a PostgreSQL logical dump, the
+documents directory, the private deployment `.env`, and non-secret manifest
+and SHA-256 checksum metadata. They do not contain raw PostgreSQL data files,
+Valkey or Mercure state, Docker images, either Git checkout, or `public_assets`.
+The archive payload layout is:
+
+```text
+manifest.txt
+checksums.sha256
+database.dump
+deploy.env
+documents/
+```
+
+The committed defaults are:
+
+```env
+BAKEDESK_BACKUP_ENABLED=1
+BAKEDESK_BACKUP_SCHEDULE="Sun *-*-* 02:00:00 America/Indiana/Indianapolis"
+BAKEDESK_BACKUP_RETENTION_DAYS=90
+BAKEDESK_BACKUP_DIRECTORY=/opt/bakedesk/backups
+```
+
+`BAKEDESK_BACKUP_SCHEDULE` is a native systemd `OnCalendar=` expression. Test
+an expression before changing `.env` with:
+
+```bash
+systemd-analyze calendar 'Sun *-*-* 02:00:00 America/Indiana/Indianapolis'
+systemd-analyze calendar '*-*-* 02:00:00 America/Indiana/Indianapolis'
+```
+
+Examples include:
+
+```text
+daily:             *-*-* 02:00:00 America/Indiana/Indianapolis
+weekly Sunday:     Sun *-*-* 02:00:00 America/Indiana/Indianapolis
+Monday and Thursday: Mon,Thu *-*-* 02:00:00 America/Indiana/Indianapolis
+```
+
+The backup directory is created root-owned with mode `0700`; archive files
+are mode `0600`. A same-SD-card backup protects against accidental deletion or
+operator mistakes but does not protect against SD-card failure. Set
+`BAKEDESK_BACKUP_DIRECTORY` to an appropriately mounted external or
+network-backed filesystem when that protection is required. This project does
+not configure NFS, SMB, or cloud storage.
+
+## Cleanup configuration
+
+BakeDesk owns reference-aware cleanup of application data. BakeDesk-Pi only
+schedules and invokes the command:
+
+```env
+BAKEDESK_CLEANUP_ENABLED=1
+BAKEDESK_CLEANUP_SCHEDULE="*-*-* 03:00:00 America/Indiana/Indianapolis"
+BAKEDESK_PRINT_JOB_RETENTION_DAYS=90
+BAKEDESK_ORDER_RETENTION_DAYS=730
+```
+
+Documents follow the application’s reference-aware cleanup rules rather than
+an independent host age setting.
+
+## Manual backup and restore
+
+Run a backup manually with:
+
+```bash
+sudo ./backup.sh
+```
+
+Archives live in `BAKEDESK_BACKUP_DIRECTORY` and use names such as
+`bakedesk-2026-10-11_020000.tar.gz`. After a successful backup, only completed
+archives matching this tool’s naming format and older than
+`BAKEDESK_BACKUP_RETENTION_DAYS` are removed. Other files in that directory
+are left alone.
+
+Restore is always manual and replaces the current BakeDesk database,
+documents, and deployment configuration. It validates the archive structure,
+manifest, checksums, and database credentials before changing production data,
+then requires typing `RESTORE` interactively:
+
+```bash
+sudo ./restore.sh /path/to/bakedesk-2026-10-11_020000.tar.gz
+```
+
+For a deliberate non-interactive restore, use `--yes`; this is destructive:
+
+```bash
+sudo ./restore.sh --yes /path/to/bakedesk-2026-10-11_020000.tar.gz
+```
+
+The restore stops Nginx, PHP, and the print worker, keeps PostgreSQL running,
+resets the configured PostgreSQL role password to the restored `.env`, drops
+and recreates the configured database, restores `database.dump` with
+`pg_restore`, swaps the documents tree, and runs `deploy.sh`. That deployment
+applies current Doctrine migrations, reconciles timers, starts the services,
+and reports Compose and PostgreSQL health. The old `.env` and documents tree
+are held temporarily while the operation completes. Valkey, Mercure, and CUPS
+host state are not restored from the archive; the Pi’s ZeroTier identity is
+also host state and remains local to that Pi.
+
+## Timer operations
+
+`deploy.sh` validates both calendar expressions with `systemd-analyze calendar`
+before writing managed units under `/etc/systemd/system`. It then runs
+`systemctl daemon-reload` and enables or disables the timers according to the
+two `BAKEDESK_*_ENABLED` flags. Both timers use `Persistent=true`; an enabled
+timer can run after the Pi returns from downtime. Editing `.env` followed by
+`sudo ./deploy.sh` applies schedule changes without rerunning `setup.sh`.
+
+Useful commands are:
+
+```bash
+systemctl status bakedesk-backup.timer
+systemctl status bakedesk-cleanup.timer
+systemctl list-timers 'bakedesk-*'
+sudo systemctl start bakedesk-backup.service
+sudo systemctl start bakedesk-cleanup.service
+journalctl -u bakedesk-backup.service
+journalctl -u bakedesk-cleanup.service
+```
+
+Preview application cleanup without changing data:
+
+```bash
+sudo ./cleanup.sh --dry-run
+```
+
+This calls the deployed container’s `php bin/console bakedesk:cleanup
+--dry-run`; cleanup rules are not duplicated in shell or SQL.
+
+## Disaster recovery
+
+On a fresh Pi:
+
+1. Install and clone BakeDesk-Pi under `/opt/bakedesk/deploy`.
+2. Run `sudo ./setup.sh`.
+3. Make the backup archive available to the Pi.
+4. Run `sudo ./restore.sh /path/to/archive.tar.gz` and confirm with `RESTORE`,
+   or use the deliberate `--yes` option for a non-interactive operation.
+5. The restore flow invokes `deploy.sh`, which builds the current application,
+   runs current migrations, reconciles timers, and verifies the services.
+6. Authorize or check ZeroTier membership as needed.
+7. Re-run the optional `setup-jadens.sh` host printer setup if that printer is
+   used by this installation.
+
+The backup contains the deployment `.env`, so it includes BakeDesk secrets and
+the configured ZeroTier network ID. It does not contain the Pi’s ZeroTier
+identity, CUPS or JADENS host configuration, Docker images, or either Git
+checkout. Do not place backup archives in either repository.

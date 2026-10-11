@@ -12,6 +12,9 @@ readonly ZEROTIER_KEY_URL=https://download.zerotier.com/contact%40zerotier.com.g
 readonly ZEROTIER_KEYRING=/usr/share/keyrings/zerotier-debian-package-keyring.gpg
 readonly ZEROTIER_KEY_FINGERPRINT=74A5E9C458E1A431F1DA57A71657198823E52A61
 
+# shellcheck source=scripts/env.sh
+source "$SCRIPT_DIR/scripts/env.sh"
+
 log() {
     printf '[BakeDesk-Pi] %s\n' "$*"
 }
@@ -182,6 +185,17 @@ prepare_environment() {
     fi
 }
 
+prepare_backup_directory() {
+    local backup_directory
+    env_read_or_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_DIRECTORY "$BAKEDESK_ROOT/backups"
+    backup_directory=$ENV_VALUE
+    [[ $backup_directory == /* && $backup_directory != / ]] \
+        || die 'BAKEDESK_BACKUP_DIRECTORY must be an absolute path other than /. '
+    install -d -o root -g root -m 0700 "$backup_directory"
+    chown root:root "$backup_directory"
+    chmod 0700 "$backup_directory"
+}
+
 add_docker_group_membership() {
     local original_user=${SUDO_USER:-}
     if [[ -n $original_user && $original_user != root ]] && id "$original_user" >/dev/null 2>&1; then
@@ -202,6 +216,15 @@ main() {
     prepare_directories
     clone_application
     prepare_environment
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_ENABLED 1
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_SCHEDULE '"Sun *-*-* 02:00:00 America/Indiana/Indianapolis"'
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_RETENTION_DAYS 90
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_DIRECTORY "$BAKEDESK_ROOT/backups"
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_CLEANUP_ENABLED 1
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_CLEANUP_SCHEDULE '"*-*-* 03:00:00 America/Indiana/Indianapolis"'
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_PRINT_JOB_RETENTION_DAYS 90
+    env_append_default "$DEPLOY_DIR/.env" BAKEDESK_ORDER_RETENTION_DAYS 730
+    prepare_backup_directory
     add_docker_group_membership
     log 'Bootstrap complete. ZeroTier is installed and active but has not joined a network.'
     log 'A reboot may be needed before every process observes the new host name.'

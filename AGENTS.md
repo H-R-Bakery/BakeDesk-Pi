@@ -68,8 +68,18 @@ restricted ownership and permissions; they must not be made world-writable.
 - Use production Symfony settings in PHP and worker containers. Do not install
   Xdebug or development Composer dependencies in the production image.
 - Do not add Kubernetes, Swarm, Traefik, Apache, Redis, RabbitMQ, another
-  reverse proxy, backup/restore tooling, reboot controls, or the future
-  `/menu/{id}` feature here.
+  reverse proxy, reboot controls, or the future `/menu/{id}` feature here.
+- BakeDesk-Pi owns logical database backup/restore, document archive/restore,
+  private `.env` backup, backup retention, and systemd schedules. BakeDesk
+  owns domain-aware cleanup through `bakedesk:cleanup`.
+- PostgreSQL backups use `pg_dump`; never copy raw PGDATA. Backup archives
+  contain secrets and remain root-readable only. Restore is explicit, manual,
+  and destructive, with validation and strong confirmation.
+- Timer schedules come from validated systemd `OnCalendar=` expressions in
+  `.env`, use `Persistent=true`, and are reconciled by `deploy.sh`.
+- Host shell scripts must not delete application database rows or independently
+  delete documents. Backup/restore must coordinate the worker and other
+  application writers appropriately.
 - Keep generic `setup.sh` vendor-neutral. Vendor-specific printer provisioning
   may live in optional top-level helper scripts.
 - The optional JADENS helper creates the `bakedesk-label` CUPS queue. BakeDesk

@@ -24,3 +24,16 @@ if systemctl is-active --quiet cups; then
 else
     printf 'inactive\n'
 fi
+for timer in bakedesk-backup.timer bakedesk-cleanup.timer; do
+    printf '%s: ' "$timer"
+    if systemctl is-enabled --quiet "$timer" 2>/dev/null; then
+        printf 'enabled, '
+    else
+        printf 'disabled, '
+    fi
+    if systemctl is-active --quiet "$timer" 2>/dev/null; then
+        printf 'active\n'
+    else
+        printf 'inactive\n'
+    fi
+done

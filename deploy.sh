@@ -5,6 +5,11 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=${BAKEDESK_DEPLOY_DIR:-$SCRIPT_DIR}
 APP_DIR=${BAKEDESK_APP_DIR:-$(cd -- "$DEPLOY_DIR/../app" && pwd)}
 
+# shellcheck source=scripts/env.sh
+source "$SCRIPT_DIR/scripts/env.sh"
+# shellcheck source=scripts/timers.sh
+source "$SCRIPT_DIR/scripts/timers.sh"
+
 log() {
     printf '[BakeDesk-Pi] %s\n' "$*"
 }
@@ -19,25 +24,10 @@ require_root_for_zerotier() {
 }
 
 read_zerotier_network_id() {
-    local line value first_character last_character
-
     ZEROTIER_NETWORK_ID=''
-    while IFS= read -r line || [[ -n $line ]]; do
-        [[ $line =~ ^[[:space:]]*ZEROTIER_NETWORK_ID[[:space:]]*= ]] || continue
-
-        value=${line#*=}
-        value=${value#"${value%%[![:space:]]*}"}
-        value=${value%"${value##*[![:space:]]}"}
-        if [[ ${#value} -ge 2 ]]; then
-            first_character=${value:0:1}
-            last_character=${value: -1}
-            if [[ ($first_character == '"' && $last_character == '"') || ($first_character == "'" && $last_character == "'") ]]; then
-                value=${value:1:${#value}-2}
-            fi
-        fi
-        ZEROTIER_NETWORK_ID=$value
-        return
-    done < "$DEPLOY_DIR/.env"
+    if env_read "$DEPLOY_DIR/.env" ZEROTIER_NETWORK_ID; then
+        ZEROTIER_NETWORK_ID=$ENV_VALUE
+    fi
 }
 
 verify_zerotier_network_id() {
@@ -104,13 +94,26 @@ configure_zerotier() {
 }
 
 compose() {
-    docker compose --project-directory "$DEPLOY_DIR" -f "$DEPLOY_DIR/compose.yaml" "$@"
+    BAKEDESK_ENV_FILE="$DEPLOY_DIR/.env" docker compose \
+        --project-directory "$DEPLOY_DIR" \
+        --env-file "$DEPLOY_DIR/.env" \
+        -f "$DEPLOY_DIR/compose.yaml" "$@"
 }
 
 [[ -f $DEPLOY_DIR/.env ]] || die "Missing $DEPLOY_DIR/.env. Run setup.sh or copy .env.example."
 [[ -f $APP_DIR/composer.json && -f $APP_DIR/symfony.lock && -x $APP_DIR/bin/console ]] \
     || die "$APP_DIR does not look like a BakeDesk checkout."
 command -v docker >/dev/null 2>&1 || die 'Docker is not installed or is not on PATH.'
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_ENABLED 1
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_SCHEDULE '"Sun *-*-* 02:00:00 America/Indiana/Indianapolis"'
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_RETENTION_DAYS 90
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_BACKUP_DIRECTORY /opt/bakedesk/backups
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_CLEANUP_ENABLED 1
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_CLEANUP_SCHEDULE '"*-*-* 03:00:00 America/Indiana/Indianapolis"'
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_PRINT_JOB_RETENTION_DAYS 90
+env_append_default "$DEPLOY_DIR/.env" BAKEDESK_ORDER_RETENTION_DAYS 730
+validate_runtime_configuration "$DEPLOY_DIR/.env"
+ensure_backup_directory "$BAKEDESK_BACKUP_DIRECTORY"
 configure_zerotier
 
 if [[ ${BAKEDESK_REFRESH_PUBLIC_ASSETS:-0} == 1 ]]; then
@@ -121,6 +124,7 @@ fi
 
 log 'Validating Docker Compose configuration.'
 compose config --quiet
+reconcile_timers "$DEPLOY_DIR/.env" "$DEPLOY_DIR"
 log 'Building the production BakeDesk PHP image.'
 compose build php
 log 'Starting infrastructure services.'
