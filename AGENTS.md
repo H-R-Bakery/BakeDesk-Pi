@@ -94,3 +94,19 @@ restricted ownership and permissions; they must not be made world-writable.
 - The deployment environment file contains secrets and is ignored by Git. Keep
   it readable only by the deployment operator and the root-owned deployment
   process as appropriate.
+
+## ZeroTier remote support
+
+- ZeroTier runs directly on the Raspberry Pi host for remote administration.
+- `setup.sh` installs, enables, and starts ZeroTier but does not join a network.
+- `ZEROTIER_NETWORK_ID` belongs in the private deployment `.env`; no real
+  network ID may be committed.
+- `deploy.sh` validates the configured network ID and joins or verifies that
+  network before deploying BakeDesk.
+- `update.sh` relies on `deploy.sh` for ZeroTier verification and must not
+  duplicate that logic.
+- Deployment does not automatically leave existing ZeroTier networks. An
+  administrator may explicitly leave an obsolete network with
+  `sudo zerotier-cli leave <network-id>`.
+- ZeroTier must remain host-only and must not be added to Compose, the PHP or
+  worker image, or any other container.

@@ -14,6 +14,95 @@ die() {
     exit 1
 }
 
+require_root_for_zerotier() {
+    [[ ${EUID} -eq 0 ]] || die 'ZeroTier membership requires root privileges; run this script with sudo, for example: sudo ./deploy.sh'
+}
+
+read_zerotier_network_id() {
+    local line value first_character last_character
+
+    ZEROTIER_NETWORK_ID=''
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line =~ ^[[:space:]]*ZEROTIER_NETWORK_ID[[:space:]]*= ]] || continue
+
+        value=${line#*=}
+        value=${value#"${value%%[![:space:]]*}"}
+        value=${value%"${value##*[![:space:]]}"}
+        if [[ ${#value} -ge 2 ]]; then
+            first_character=${value:0:1}
+            last_character=${value: -1}
+            if [[ ($first_character == '"' && $last_character == '"') || ($first_character == "'" && $last_character == "'") ]]; then
+                value=${value:1:${#value}-2}
+            fi
+        fi
+        ZEROTIER_NETWORK_ID=$value
+        return
+    done < "$DEPLOY_DIR/.env"
+}
+
+verify_zerotier_network_id() {
+    read_zerotier_network_id
+    [[ -n $ZEROTIER_NETWORK_ID ]] \
+        || die "ZEROTIER_NETWORK_ID is not configured in $DEPLOY_DIR/.env. Set the ZeroTier network ID before running deploy.sh."
+    [[ $ZEROTIER_NETWORK_ID =~ ^[0-9A-Fa-f]{16}$ ]] \
+        || die "Invalid ZEROTIER_NETWORK_ID in $DEPLOY_DIR/.env. Expected exactly 16 hexadecimal characters."
+    ZEROTIER_NETWORK_ID=${ZEROTIER_NETWORK_ID,,}
+}
+
+zerotier_network_is_joined() {
+    local networks=$1
+    awk -v network_id="$ZEROTIER_NETWORK_ID" \
+        '$1 == "200" && $2 == "listnetworks" && $3 == network_id {found=1} END {exit !found}' \
+        <<<"$networks"
+}
+
+configure_zerotier() {
+    require_root_for_zerotier
+    verify_zerotier_network_id
+    command -v zerotier-cli >/dev/null 2>&1 \
+        || die 'zerotier-cli is unavailable. Run sudo ./setup.sh first.'
+    command -v systemctl >/dev/null 2>&1 \
+        || die 'systemctl is unavailable; run this on the supported systemd host after sudo ./setup.sh.'
+    systemctl is-active --quiet zerotier-one \
+        || die 'zerotier-one is not active. Run sudo ./setup.sh and check: systemctl status zerotier-one'
+
+    local networks network_line network_status node_info node_id
+    networks=$(zerotier-cli listnetworks) \
+        || die 'Could not inspect ZeroTier memberships. Check: systemctl status zerotier-one'
+    if zerotier_network_is_joined "$networks"; then
+        log "ZeroTier network $ZEROTIER_NETWORK_ID is already joined."
+    else
+        log "Joining ZeroTier network $ZEROTIER_NETWORK_ID."
+        zerotier-cli join "$ZEROTIER_NETWORK_ID" \
+            || die "Could not join ZeroTier network $ZEROTIER_NETWORK_ID."
+        networks=$(zerotier-cli listnetworks) \
+            || die 'The ZeroTier join succeeded but membership could not be verified.'
+        zerotier_network_is_joined "$networks" \
+            || die "The ZeroTier join command succeeded, but network $ZEROTIER_NETWORK_ID was not listed afterward."
+    fi
+
+    network_line=$(awk -v network_id="$ZEROTIER_NETWORK_ID" \
+        '$1 == "200" && $2 == "listnetworks" && $3 == network_id {print; exit}' \
+        <<<"$networks")
+    network_status=$(awk '{print $5}' <<<"$network_line")
+    node_info=$(zerotier-cli info) || die 'Could not query ZeroTier node information.'
+    node_id=$(awk '$1 == "200" && $2 == "info" {print $3; exit}' <<<"$node_info")
+
+    log 'ZeroTier:'
+    log "  node: ${node_id:-unknown}"
+    log "  network: $ZEROTIER_NETWORK_ID"
+    if [[ $network_status == OK ]]; then
+        log '  status: joined'
+    else
+        log "  status: joined (${network_status:-unknown})"
+    fi
+    case $network_status in
+        ACCESS_DENIED|REQUESTING_CONFIGURATION)
+            log 'The ZeroTier member may still need authorization in ZeroTier Central.'
+            ;;
+    esac
+}
+
 compose() {
     docker compose --project-directory "$DEPLOY_DIR" -f "$DEPLOY_DIR/compose.yaml" "$@"
 }
@@ -22,6 +111,7 @@ compose() {
 [[ -f $APP_DIR/composer.json && -f $APP_DIR/symfony.lock && -x $APP_DIR/bin/console ]] \
     || die "$APP_DIR does not look like a BakeDesk checkout."
 command -v docker >/dev/null 2>&1 || die 'Docker is not installed or is not on PATH.'
+configure_zerotier
 
 if [[ ${BAKEDESK_REFRESH_PUBLIC_ASSETS:-0} == 1 ]]; then
     log 'Stopping the stack so the generated public-assets volume can be refreshed.'

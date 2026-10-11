@@ -17,30 +17,43 @@ V1 is HTTP-only and intended for the bakery LAN.
 
 ## First installation
 
-Clone this repository onto the Pi at `/opt/bakedesk/deploy`, then run:
+On a fresh Pi, clone this repository at `/opt/bakedesk/deploy`, then run:
 
 ```bash
+sudo mkdir -p /opt/bakedesk
+sudo git clone https://github.com/H-R-Bakery/BakeDesk-Pi.git /opt/bakedesk/deploy
 cd /opt/bakedesk/deploy
 sudo ./setup.sh
 ```
 
 `setup.sh` checks for Debian/Raspberry Pi OS ARM64, configures the host name,
 installs and enables Avahi, installs Docker Engine from Docker’s official
-Debian repository, installs host CUPS, prepares `/opt/bakedesk/data`, and
-clones BakeDesk into `/opt/bakedesk/app` if that directory does not already
-exist. It does not replace an existing application checkout.
+Debian repository, installs and starts ZeroTier on the host, installs host
+CUPS, prepares `/opt/bakedesk/data`, and clones BakeDesk into
+`/opt/bakedesk/app` if that directory does not already exist. It does not
+replace an existing application checkout and does not join a ZeroTier network.
 
 Review `/opt/bakedesk/deploy/.env` after setup. Setup creates it from
 `.env.example` with random local secrets when it is missing. It is ignored by
-Git and must remain private.
+Git and must remain private. Set the production ZeroTier network manually:
 
-Reboot the host after setup.
+```env
+ZEROTIER_NETWORK_ID=<network-id>
+```
 
-Start the production stack with:
+`deploy.sh` reads and validates that value, joins the configured network when
+necessary, and verifies membership before building or restarting BakeDesk.
+Run it with:
 
 ```bash
 sudo /opt/bakedesk/deploy/deploy.sh
 ```
+
+A newly joined private member may require authorization in ZeroTier Central.
+The deployment reports that state and continues once the host service is
+working and the network membership is present.
+
+Reboot the host after setup.
 
 The deployment builds the PHP image from the sibling application checkout,
 starts the stack, and runs pending Doctrine migrations. The PHP build context
@@ -156,9 +169,23 @@ Useful host checks include:
 systemctl status avahi-daemon
 systemctl status docker
 systemctl status cups
+systemctl status zerotier-one
+sudo zerotier-cli info
+sudo zerotier-cli listnetworks
 lpstat -t
 docker compose --project-directory /opt/bakedesk/deploy -f /opt/bakedesk/deploy/compose.yaml ps
 ```
+
+To remove an obsolete ZeroTier membership explicitly, use:
+
+```bash
+sudo zerotier-cli leave <network-id>
+```
+
+Deployment leaves existing ZeroTier networks alone, including networks that
+were joined before or after the value in `.env` changes. `update.sh` calls
+`deploy.sh`, so application updates repeat the same membership verification
+without duplicating the ZeroTier logic.
 
 Configure printers later in BakeDesk with IPP addresses such as the printer’s
 direct IPP endpoint. Vendor-specific host printer provisioning is optional and

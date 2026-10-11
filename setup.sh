@@ -8,6 +8,9 @@ readonly DEPLOY_DIR=${BAKEDESK_DEPLOY_DIR:-$BAKEDESK_ROOT/deploy}
 readonly APP_DIR=${BAKEDESK_APP_DIR:-$BAKEDESK_ROOT/app}
 readonly DATA_DIR=${BAKEDESK_DATA_DIR:-$BAKEDESK_ROOT/data}
 readonly APP_REPOSITORY=https://github.com/H-R-Bakery/BakeDesk.git
+readonly ZEROTIER_KEY_URL=https://download.zerotier.com/contact%40zerotier.com.gpg
+readonly ZEROTIER_KEYRING=/usr/share/keyrings/zerotier-debian-package-keyring.gpg
+readonly ZEROTIER_KEY_FINGERPRINT=74A5E9C458E1A431F1DA57A71657198823E52A61
 
 log() {
     printf '[BakeDesk-Pi] %s\n' "$*"
@@ -85,15 +88,44 @@ EOF
         docker-compose-plugin
 }
 
+install_zerotier() {
+    log 'Configuring ZeroTier`s official Debian apt repository over HTTPS.'
+    install -d -m 0755 /usr/share/keyrings
+
+    local temp_dir key_file keyring_file fingerprint
+    temp_dir=$(mktemp -d)
+    key_file=$temp_dir/zerotier-release-key.gpg
+    keyring_file=$temp_dir/zerotier-debian-package-keyring.gpg
+
+    curl --fail --silent --show-error --location \
+        "$ZEROTIER_KEY_URL" \
+        --output "$key_file"
+    fingerprint=$(gpg --show-keys --with-colons "$key_file" \
+        | awk -F: '$1 == "fpr" {print $10; exit}')
+    [[ $fingerprint == "$ZEROTIER_KEY_FINGERPRINT" ]] \
+        || die 'The downloaded ZeroTier repository signing key fingerprint did not match the official key.'
+    gpg --dearmor --yes --output "$keyring_file" "$key_file"
+    install -o root -g root -m 0644 "$keyring_file" "$ZEROTIER_KEYRING"
+    rm -rf -- "$temp_dir"
+
+    cat > /etc/apt/sources.list.d/zerotier.list <<EOF
+deb [arch=arm64 signed-by=$ZEROTIER_KEYRING] https://download.zerotier.com/debian/$VERSION_CODENAME $VERSION_CODENAME main
+EOF
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y zerotier-one
+}
+
 enable_services() {
-    log 'Enabling Docker, Avahi, and host CUPS.'
+    log 'Enabling Docker, Avahi, CUPS, and ZeroTier.'
     if command -v systemctl >/dev/null 2>&1; then
         systemctl enable --now docker
         systemctl enable --now avahi-daemon
         systemctl enable --now cups
+        systemctl enable --now zerotier-one
         systemctl is-active --quiet docker || die 'Docker did not become active.'
         systemctl is-active --quiet avahi-daemon || die 'Avahi did not become active.'
         systemctl is-active --quiet cups || die 'CUPS did not become active.'
+        systemctl is-active --quiet zerotier-one || die 'ZeroTier did not become active. Check: systemctl status zerotier-one'
     else
         log 'systemctl is unavailable; packages were installed but services could not be enabled automatically.'
     fi
@@ -165,14 +197,20 @@ main() {
     configure_hostname
     install_base_packages
     install_docker
+    install_zerotier
     enable_services
     prepare_directories
     clone_application
     prepare_environment
     add_docker_group_membership
-    log 'Bootstrap complete.'
+    log 'Bootstrap complete. ZeroTier is installed and active but has not joined a network.'
     log 'A reboot may be needed before every process observes the new host name.'
-    log "Review $DEPLOY_DIR/.env, then run $DEPLOY_DIR/deploy.sh."
+    log 'Review:'
+    log "$DEPLOY_DIR/.env"
+    log 'Set:'
+    log 'ZEROTIER_NETWORK_ID=<your ZeroTier network ID>'
+    log 'Then run:'
+    log "sudo $DEPLOY_DIR/deploy.sh"
 }
 
 main "$@"
