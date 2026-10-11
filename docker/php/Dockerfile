@@ -83,6 +83,7 @@ RUN apt-get update \
         libpq5 \
         libxml2 \
         libzip4 \
+        nano \
     && rm -rf /var/lib/apt/lists/*
 
 # The build and runtime images use the same PHP ABI and base distribution.
