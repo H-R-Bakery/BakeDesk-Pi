@@ -708,8 +708,7 @@ verify_container_ipp_authorization() {
             . $attribute(0x45, "printer-uri", $printer_uri)
             . $attribute(0x42, "requesting-user-name", "bakedesk-ipp-check")
             . $attribute(0x49, "document-format", "application/pdf")
-            . chr(0x02)
-            . chr(0x21) . pack("n", 6) . "copies" . pack("N", 1);
+            . chr(0x03);
 
         $curl = curl_init($url);
         curl_setopt_array($curl, [
